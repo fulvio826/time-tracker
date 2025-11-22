@@ -161,11 +161,14 @@
     <button class="primary" id="addClientBtn">Aggiungi cliente</button>
     <button id="stopAllBtn">Ferma tutti</button>
     <button id="backupBtn">Esporta backup</button>
+    <button id="importBtn">Importa backup</button>
+    <!-- input file nascosto per l'import -->
+    <input type="file" id="importInput" accept="application/json" style="display:none" />
   </div>
   <div class="small">
     ✔ Clicca “Attiva” per iniziare a conteggiare il tempo su un cliente.<br />
     ✔ Passando ad un altro cliente, il precedente si ferma automaticamente.<br />
-    ✔ Puoi aggiungere minuti extra, impostare la tariffa €/h e scegliere un colore per cliente.<br />
+    ✔ Puoi aggiungere minuti extra, impostare la tariffa €/h, scegliere un colore per cliente, esportare e importare backup.<br />
     ✔ I dati sono salvati nel browser. Il backup esportato può andare in una cartella su iCloud Drive.
   </div>
 
@@ -366,6 +369,7 @@
       updateLiveValues();
     }
 
+    // ----- EXPORT BACKUP -----
     function exportBackup() {
       const payload = {
         version: 1,
@@ -389,6 +393,44 @@
       URL.revokeObjectURL(url);
 
       alert("Backup esportato. Se i download sono in una cartella iCloud Drive, il file è già su iCloud.");
+    }
+
+    // ----- IMPORT BACKUP -----
+    function handleImportFile(file) {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        try {
+          const text = event.target.result;
+          const data = JSON.parse(text);
+
+          if (!data || !Array.isArray(data.clients)) {
+            alert("Il file selezionato non sembra essere un backup valido.");
+            return;
+          }
+
+          const conferma = confirm("Importando il backup sovrascriverai i dati attuali. Procedere?");
+          if (!conferma) return;
+
+          // Mappo i client importati nella struttura corrente
+          clients = data.clients.map((c, index) => ({
+            id: c.id || (Date.now().toString() + Math.random().toString(36).slice(2)),
+            name: c.name || "Senza nome",
+            totalMs: typeof c.totalMs === "number" ? c.totalMs : 0,
+            isActive: false,
+            lastStart: null,
+            hourlyRate: typeof c.hourlyRate === "number" ? c.hourlyRate : 0,
+            color: c.color || getDefaultColor(index)
+          }));
+
+          saveToStorage();
+          renderTable();
+          alert("Backup importato correttamente.");
+        } catch (e) {
+          console.error("Errore durante l'import del backup", e);
+          alert("Errore durante la lettura del file di backup.");
+        }
+      };
+      reader.readAsText(file);
     }
 
     function renderTable() {
@@ -581,6 +623,8 @@
       const addBtn = document.getElementById("addClientBtn");
       const stopAllBtn = document.getElementById("stopAllBtn");
       const backupBtn = document.getElementById("backupBtn");
+      const importBtn = document.getElementById("importBtn");
+      const importInput = document.getElementById("importInput");
 
       addBtn.addEventListener("click", () => {
         addClient(input.value);
@@ -601,6 +645,18 @@
 
       backupBtn.addEventListener("click", () => {
         exportBackup();
+      });
+
+      importBtn.addEventListener("click", () => {
+        importInput.value = "";
+        importInput.click();
+      });
+
+      importInput.addEventListener("change", (e) => {
+        const file = e.target.files && e.target.files[0];
+        if (file) {
+          handleImportFile(file);
+        }
       });
 
       setInterval(() => {
