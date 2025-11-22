@@ -2,7 +2,7 @@
 <html lang="it">
 <head>
   <meta charset="UTF-8" />
-  <title>Time Tracker Clienti</title>
+  <title>Time Tracker Clienti (Cloud)</title>
   <style>
     body {
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -152,10 +152,22 @@
         opacity: 0.2;
       }
     }
+
+    .status-banner {
+      font-size: 11px;
+      margin-top: 4px;
+      color: #666;
+    }
+    .status-banner strong {
+      font-weight: 600;
+    }
+    .status-banner .error {
+      color: #b00020;
+    }
   </style>
 </head>
 <body>
-  <h1>Time Tracker Clienti</h1>
+  <h1>Time Tracker Clienti (Cloud)</h1>
   <div class="top-bar">
     <input type="text" id="clientNameInput" placeholder="Nome cliente o progetto (es. Cliente X - Campagna FW25)" />
     <button class="primary" id="addClientBtn">Aggiungi cliente</button>
@@ -166,10 +178,12 @@
     <input type="file" id="importInput" accept="application/json" style="display:none" />
   </div>
   <div class="small">
-    ✔ Clicca “Attiva” per iniziare a conteggiare il tempo su un cliente.<br />
-    ✔ Passando ad un altro cliente, il precedente si ferma automaticamente.<br />
-    ✔ Puoi aggiungere minuti extra, impostare la tariffa €/h, scegliere un colore per cliente, esportare e importare backup.<br />
-    ✔ I dati sono salvati nel browser. Il backup esportato può andare in una cartella su iCloud Drive.
+    ✔ Dati sincronizzati su Supabase (database online) → li vedi uguali da ogni dispositivo.<br />
+    ✔ Clicca “Attiva” per iniziare a conteggiare il tempo su un cliente; passando ad un altro, il precedente si ferma.<br />
+    ✔ Puoi aggiungere minuti extra, impostare la tariffa €/h, scegliere un colore per cliente, esportare e importare backup.
+  </div>
+  <div id="connectionStatus" class="status-banner">
+    Connessione a Supabase: <strong id="connectionStatusText">in corso...</strong>
   </div>
 
   <table id="clientsTable">
@@ -189,11 +203,25 @@
     </tbody>
   </table>
 
-  <script>
-    // client: { id, name, totalMs, isActive, lastStart, hourlyRate, color }
+  <!-- Supabase JS SDK -->
+  <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
 
+  <script>
+    // ====== CONFIGURAZIONE SUPABASE ======
+    const SUPABASE_URL = "https://chyesztwritnxwpdogor.supabase.co";
+    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNoeWVzenR3cml0bnh3cGRvZ29yIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM4NDk1MDgsImV4cCI6MjA3OTQyNTUwOH0.npeDAJQQGOhL3q1oi5WuxP6C0n9l_YdAeHNfrJwiaDo";
+    const WORKSPACE_ID = "FULVIO";
+
+    const { createClient } = supabase;
+    const supabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    // ====== STATO LOCALE ======
+    // client: { id, name, totalMs, isActive, lastStart, hourlyRate, color }
     let clients = [];
-    const STORAGE_KEY = "timeTrackerClientsV1";
+    let isLoading = true;
+    let lastSyncError = null;
+
+    const STORAGE_KEY_BACKUP = "timeTrackerBackupMetaV1"; // solo meta info locale (facoltativo)
 
     const COLOR_PALETTE = [
       "#FF6B6B",
@@ -205,34 +233,16 @@
       "#00BBF9",
       "#38B000"
     ];
-
     function getDefaultColor(index) {
       return COLOR_PALETTE[index % COLOR_PALETTE.length];
     }
 
-    function loadFromStorage() {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return;
-      try {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          clients = parsed.map((c, index) => ({
-            id: c.id,
-            name: c.name,
-            totalMs: c.totalMs || 0,
-            isActive: false,
-            lastStart: null,
-            hourlyRate: c.hourlyRate || 0,
-            color: c.color || getDefaultColor(index)
-          }));
-        }
-      } catch (e) {
-        console.error("Errore nel parse del localStorage", e);
-      }
-    }
-
-    function saveToStorage() {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(clients));
+    // ====== UTILITÀ UI ======
+    function setConnectionStatus(text, isError = false) {
+      const el = document.getElementById("connectionStatusText");
+      if (!el) return;
+      el.textContent = text;
+      el.className = isError ? "error" : "";
     }
 
     function formatMs(ms) {
@@ -254,6 +264,134 @@
       return clients.find(c => c.id === id);
     }
 
+    // ====== SUPABASE: SYNC FUNZIONI ======
+
+    async function loadClientsFromSupabase() {
+      try {
+        const { data, error } = await supabaseClient
+          .from("projects")
+          .select("*")
+          .order("name", { ascending: true });
+
+        if (error) throw error;
+
+        clients = (data || []).map((row, index) => ({
+          id: row.id,
+          name: row.name || "Senza nome",
+          totalMs: typeof row.total_ms === "number" ? row.total_ms : 0,
+          isActive: !!row.is_active,
+          lastStart: typeof row.last_start === "number" ? row.last_start : null,
+          hourlyRate: row.hourly_rate !== null ? Number(row.hourly_rate) : 0,
+          color: row.color || getDefaultColor(index)
+        }));
+
+        // per sicurezza: al load mettiamo tutti in pausa, ma contabilizziamo eventuali last_start
+        const now = Date.now();
+        clients.forEach(c => {
+          if (c.isActive && c.lastStart != null) {
+            c.totalMs += now - c.lastStart;
+          }
+          c.isActive = false;
+          c.lastStart = null;
+        });
+
+        // salviamo subito lo stato "normalizzato"
+        for (const c of clients) {
+          void upsertProject(c);
+        }
+
+        isLoading = false;
+        lastSyncError = null;
+        setConnectionStatus("online ✓");
+      } catch (err) {
+        console.error("Errore caricando i progetti da Supabase", err);
+        isLoading = false;
+        lastSyncError = err;
+        setConnectionStatus("errore di connessione", true);
+      }
+    }
+
+    async function upsertProject(client) {
+      try {
+        const payload = {
+          id: client.id,
+          name: client.name,
+          total_ms: client.totalMs,
+          is_active: client.isActive,
+          last_start: client.lastStart,
+          hourly_rate: client.hourlyRate,
+          color: client.color,
+          workspace_id: WORKSPACE_ID
+        };
+        const { error } = await supabaseClient.from("projects").upsert(payload);
+        if (error) throw error;
+        lastSyncError = null;
+        setConnectionStatus("online ✓");
+      } catch (err) {
+        console.error("Errore upsert progetto", err);
+        lastSyncError = err;
+        setConnectionStatus("errore di sync (vedi console)", true);
+      }
+    }
+
+    async function insertNewProject(name, color) {
+      const payload = {
+        name,
+        total_ms: 0,
+        is_active: false,
+        last_start: null,
+        hourly_rate: 0,
+        color,
+        workspace_id: WORKSPACE_ID
+      };
+      const { data, error } = await supabaseClient
+        .from("projects")
+        .insert(payload)
+        .select()
+        .single();
+
+      if (error) throw error;
+      return {
+        id: data.id,
+        name: data.name || name,
+        totalMs: data.total_ms || 0,
+        isActive: !!data.is_active,
+        lastStart: data.last_start || null,
+        hourlyRate: data.hourly_rate !== null ? Number(data.hourly_rate) : 0,
+        color: data.color || color
+      };
+    }
+
+    async function deleteProjectFromSupabase(id) {
+      try {
+        const { error } = await supabaseClient
+          .from("projects")
+          .delete()
+          .eq("id", id);
+        if (error) throw error;
+        lastSyncError = null;
+        setConnectionStatus("online ✓");
+      } catch (err) {
+        console.error("Errore delete progetto", err);
+        lastSyncError = err;
+        setConnectionStatus("errore di sync (vedi console)", true);
+      }
+    }
+
+    async function deleteAllProjectsForWorkspace() {
+      try {
+        const { error } = await supabaseClient
+          .from("projects")
+          .delete()
+          .eq("workspace_id", WORKSPACE_ID);
+        if (error) throw error;
+      } catch (err) {
+        console.error("Errore nel cancellare tutti i progetti", err);
+      }
+    }
+
+    // ====== LOGICA TIMER (COME PRIMA, MA SYNCH CON SUPABASE) ======
+
     function stopAllClients() {
       const now = Date.now();
       clients.forEach(c => {
@@ -261,9 +399,9 @@
           c.totalMs += now - c.lastStart;
           c.isActive = false;
           c.lastStart = null;
+          void upsertProject(c);
         }
       });
-      saveToStorage();
       renderTable();
     }
 
@@ -276,19 +414,21 @@
         client.totalMs += now - client.lastStart;
         client.isActive = false;
         client.lastStart = null;
+        void upsertProject(client);
       } else {
         clients.forEach(c => {
           if (c.isActive && c.lastStart != null) {
             c.totalMs += now - c.lastStart;
             c.isActive = false;
             c.lastStart = null;
+            void upsertProject(c);
           }
         });
         client.isActive = true;
         client.lastStart = now;
+        void upsertProject(client);
       }
 
-      saveToStorage();
       renderTable();
     }
 
@@ -301,7 +441,7 @@
       client.totalMs = 0;
       client.isActive = false;
       client.lastStart = null;
-      saveToStorage();
+      void upsertProject(client);
       renderTable();
     }
 
@@ -312,26 +452,24 @@
       if (!conferma) return;
 
       clients = clients.filter(c => c.id !== id);
-      saveToStorage();
+      void deleteProjectFromSupabase(id);
       renderTable();
     }
 
-    function addClient(name) {
+    async function addClient(name) {
       const trimmed = name.trim();
       if (!trimmed) return;
       const index = clients.length;
-      const newClient = {
-        id: Date.now().toString() + Math.random().toString(36).slice(2),
-        name: trimmed,
-        totalMs: 0,
-        isActive: false,
-        lastStart: null,
-        hourlyRate: 0,
-        color: getDefaultColor(index)
-      };
-      clients.push(newClient);
-      saveToStorage();
-      renderTable();
+      const color = getDefaultColor(index);
+
+      try {
+        const newClient = await insertNewProject(trimmed, color);
+        clients.push(newClient);
+        renderTable();
+      } catch (err) {
+        console.error("Errore creando nuovo progetto", err);
+        alert("Errore nel creare il progetto su Supabase.");
+      }
     }
 
     function addExtraMinutes(id) {
@@ -348,7 +486,7 @@
       }
 
       client.totalMs += minutes * 60 * 1000;
-      saveToStorage();
+      void upsertProject(client);
       renderTable();
     }
 
@@ -358,21 +496,21 @@
       const clean = String(newRateStr).replace(",", ".");
       const rate = parseFloat(clean);
       client.hourlyRate = isNaN(rate) || rate < 0 ? 0 : rate;
-      saveToStorage();
+      void upsertProject(client);
     }
 
     function updateClientColor(id, newColor) {
       const client = getClientById(id);
       if (!client) return;
       client.color = newColor || "#CCCCCC";
-      saveToStorage();
+      void upsertProject(client);
       updateLiveValues();
     }
 
-    // ----- EXPORT BACKUP -----
+    // ====== BACKUP EXPORT ======
     function exportBackup() {
       const payload = {
-        version: 1,
+        version: 2,
         exportedAt: new Date().toISOString(),
         clients
       };
@@ -392,47 +530,81 @@
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
 
+      try {
+        localStorage.setItem(STORAGE_KEY_BACKUP, JSON.stringify({ lastExport: now.toISOString(), fileName }));
+      } catch (_) {}
+
       alert("Backup esportato. Se i download sono in una cartella iCloud Drive, il file è già su iCloud.");
     }
 
-    // ----- IMPORT BACKUP -----
+    // ====== BACKUP IMPORT (dentro Supabase) ======
     function handleImportFile(file) {
       const reader = new FileReader();
-      reader.onload = (event) => {
+      reader.onload = async (event) => {
         try {
           const text = event.target.result;
           const data = JSON.parse(text);
 
-          if (!data || !Array.isArray(data.clients)) {
+          const importedClients = data.clients || data.projects;
+          if (!data || !Array.isArray(importedClients)) {
             alert("Il file selezionato non sembra essere un backup valido.");
             return;
           }
 
-          const conferma = confirm("Importando il backup sovrascriverai i dati attuali. Procedere?");
+          const conferma = confirm("Importando il backup sovrascriverai i dati attuali nel database. Procedere?");
           if (!conferma) return;
 
-          // Mappo i client importati nella struttura corrente
-          clients = data.clients.map((c, index) => ({
-            id: c.id || (Date.now().toString() + Math.random().toString(36).slice(2)),
-            name: c.name || "Senza nome",
-            totalMs: typeof c.totalMs === "number" ? c.totalMs : 0,
-            isActive: false,
-            lastStart: null,
-            hourlyRate: typeof c.hourlyRate === "number" ? c.hourlyRate : 0,
-            color: c.color || getDefaultColor(index)
-          }));
+          // cancella tutto dal workspace
+          await deleteAllProjectsForWorkspace();
 
-          saveToStorage();
+          // ricostruisci clients + Supabase (nuovi UUID)
+          clients = [];
+          for (let i = 0; i < importedClients.length; i++) {
+            const c = importedClients[i];
+            const color = c.color || getDefaultColor(i);
+            const total = typeof c.totalMs === "number" ? c.totalMs : (typeof c.total_ms === "number" ? c.total_ms : 0);
+            const rate = typeof c.hourlyRate === "number" ? c.hourlyRate : (typeof c.hourly_rate === "number" ? c.hourly_rate : 0);
+
+            const payload = {
+              name: c.name || "Senza nome",
+              total_ms: total,
+              is_active: false,
+              last_start: null,
+              hourly_rate: rate,
+              color,
+              workspace_id: WORKSPACE_ID
+            };
+
+            const { data: row, error } = await supabaseClient
+              .from("projects")
+              .insert(payload)
+              .select()
+              .single();
+
+            if (error) throw error;
+
+            clients.push({
+              id: row.id,
+              name: row.name,
+              totalMs: row.total_ms || 0,
+              isActive: false,
+              lastStart: null,
+              hourlyRate: row.hourly_rate !== null ? Number(row.hourly_rate) : 0,
+              color: row.color || color
+            });
+          }
+
           renderTable();
           alert("Backup importato correttamente.");
-        } catch (e) {
-          console.error("Errore durante l'import del backup", e);
-          alert("Errore durante la lettura del file di backup.");
+        } catch (err) {
+          console.error("Errore durante l'import del backup", err);
+          alert("Errore durante la lettura o l'import del file di backup.");
         }
       };
       reader.readAsText(file);
     }
 
+    // ====== RENDER TABELLA ======
     function renderTable() {
       const tbody = document.getElementById("clientsTbody");
       tbody.innerHTML = "";
@@ -441,7 +613,7 @@
         const tr = document.createElement("tr");
         const td = document.createElement("td");
         td.colSpan = 7;
-        td.textContent = "Nessun cliente ancora aggiunto.";
+        td.textContent = isLoading ? "Caricamento..." : "Nessun cliente ancora aggiunto.";
         td.style.color = "#666";
         tr.appendChild(td);
         tbody.appendChild(tr);
@@ -452,7 +624,7 @@
         const tr = document.createElement("tr");
         tr.dataset.id = client.id;
 
-        // Colore (quadrato singolo)
+        // Colore
         const colorTd = document.createElement("td");
         colorTd.className = "color-cell";
         const wrapper = document.createElement("div");
@@ -615,10 +787,8 @@
       });
     }
 
+    // ====== BOOTSTRAP APP ======
     document.addEventListener("DOMContentLoaded", () => {
-      loadFromStorage();
-      renderTable();
-
       const input = document.getElementById("clientNameInput");
       const addBtn = document.getElementById("addClientBtn");
       const stopAllBtn = document.getElementById("stopAllBtn");
@@ -659,6 +829,13 @@
         }
       });
 
+      // carica dati da Supabase
+      setConnectionStatus("connessione in corso...");
+      loadClientsFromSupabase().then(() => {
+        renderTable();
+      });
+
+      // aggiorna solo valori live, non rifà la tabella
       setInterval(() => {
         updateLiveValues();
       }, 1000);
