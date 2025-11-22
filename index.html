@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <title>Time Tracker Clienti</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 16px auto;
+      max-width: 1000px;
+      line-height: 1.4;
+      font-size: 13px;
+    }
+    h1 {
+      font-size: 20px;
+      margin-bottom: 8px;
+    }
+    .top-bar {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+    #clientNameInput {
+      padding: 6px;
+      font-size: 12px;
+      flex: 1;
+      min-width: 220px;
+    }
+    button {
+      padding: 5px 9px;
+      font-size: 11px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      cursor: pointer;
+      background: #f7f7f7;
+      white-space: nowrap;
+    }
+    button:hover {
+      background: #eee;
+    }
+    button.primary {
+      background: #000;
+      color: #fff;
+      border-color: #000;
+    }
+    button.primary:hover {
+      background: #333;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 6px;
+    }
+    th, td {
+      padding: 4px 6px;
+      border-bottom: 1px solid #ddd;
+      text-align: left;
+      font-size: 12px;
+      vertical-align: middle;
+    }
+    th {
+      font-weight: 600;
+    }
+    tr.active-row {
+      background: #f7f7f7;
+    }
+    .time {
+      font-family: "SF Mono", Menlo, Monaco, Consolas, "Courier New", monospace;
+      font-size: 12px;
+    }
+    .badge-active {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: #000;
+      color: #fff;
+      font-size: 10px;
+    }
+    .small {
+      font-size: 11px;
+      color: #666;
+      margin-top: 2px;
+      margin-bottom: 4px;
+    }
+    .actions {
+      display: flex;
+      gap: 4px;
+      flex-wrap: nowrap;
+    }
+    .rate-input {
+      width: 70px;
+      padding: 3px 4px;
+      font-size: 11px;
+    }
+    .cost {
+      font-weight: 500;
+      font-size: 12px;
+    }
+
+    /* Colore compatto all'inizio */
+    .color-cell {
+      width: 30px;
+    }
+    .color-wrapper {
+      position: relative;
+      width: 14px;
+      height: 14px;
+    }
+    .color-swatch {
+      position: absolute;
+      inset: 0;
+      border-radius: 3px;
+      border: 1px solid #ccc;
+      box-sizing: border-box;
+    }
+    .color-picker {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      cursor: pointer;
+      border: none;
+      padding: 0;
+      margin: 0;
+    }
+
+    /* riga sottile colorata a sinistra quando attivo */
+    tr[data-id] {
+      border-left: 3px solid transparent;
+    }
+
+    /* LED lampeggiante */
+    .status-wrapper {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .led {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      display: inline-block;
+      animation: led-blink 1s infinite ease-in-out;
+    }
+
+    @keyframes led-blink {
+      0%, 40% {
+        opacity: 1;
+      }
+      50%, 100% {
+        opacity: 0.2;
+      }
+    }
+  </style>
+</head>
+<body>
+  <h1>Time Tracker Clienti</h1>
+  <div class="top-bar">
+    <input type="text" id="clientNameInput" placeholder="Nome cliente o progetto (es. Cliente X - Campagna FW25)" />
+    <button class="primary" id="addClientBtn">Aggiungi cliente</button>
+    <button id="stopAllBtn">Ferma tutti</button>
+    <button id="backupBtn">Esporta backup</button>
+  </div>
+  <div class="small">
+    ✔ Clicca “Attiva” per iniziare a conteggiare il tempo su un cliente.<br />
+    ✔ Passando ad un altro cliente, il precedente si ferma automaticamente.<br />
+    ✔ Puoi aggiungere minuti extra, impostare la tariffa €/h e scegliere un colore per cliente.<br />
+    ✔ I dati sono salvati nel browser. Il backup esportato può andare in una cartella su iCloud Drive.
+  </div>
+
+  <table id="clientsTable">
+    <thead>
+      <tr>
+        <th style="width:30px;">Colore</th>
+        <th>Cliente / Progetto</th>
+        <th>Tempo totale</th>
+        <th>Tariffa oraria (€)</th>
+        <th>Importo stimato (€)</th>
+        <th>Stato</th>
+        <th>Azioni</th>
+      </tr>
+    </thead>
+    <tbody id="clientsTbody">
+      <!-- Righe generate via JavaScript -->
+    </tbody>
+  </table>
+
+  <script>
+    // client: { id, name, totalMs, isActive, lastStart, hourlyRate, color }
+
+    let clients = [];
+    const STORAGE_KEY = "timeTrackerClientsV1";
+
+    const COLOR_PALETTE = [
+      "#FF6B6B",
+      "#4ECDC4",
+      "#FFD93D",
+      "#1A535C",
+      "#FF9F1C",
+      "#9B5DE5",
+      "#00BBF9",
+      "#38B000"
+    ];
+
+    function getDefaultColor(index) {
+      return COLOR_PALETTE[index % COLOR_PALETTE.length];
+    }
+
+    function loadFromStorage() {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return;
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          clients = parsed.map((c, index) => ({
+            id: c.id,
+            name: c.name,
+            totalMs: c.totalMs || 0,
+            isActive: false,
+            lastStart: null,
+            hourlyRate: c.hourlyRate || 0,
+            color: c.color || getDefaultColor(index)
+          }));
+        }
+      } catch (e) {
+        console.error("Errore nel parse del localStorage", e);
+      }
+    }
+
+    function saveToStorage() {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(clients));
+    }
+
+    function formatMs(ms) {
+      const totalSeconds = Math.floor(ms / 1000);
+      const seconds = totalSeconds % 60;
+      const totalMinutes = Math.floor(totalSeconds / 60);
+      const minutes = totalMinutes % 60;
+      const hours = Math.floor(totalMinutes / 60);
+      const pad = (n) => String(n).padStart(2, "0");
+      return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+    }
+
+    function formatCurrency(num) {
+      if (!isFinite(num)) return "-";
+      return num.toFixed(2);
+    }
+
+    function getClientById(id) {
+      return clients.find(c => c.id === id);
+    }
+
+    function stopAllClients() {
+      const now = Date.now();
+      clients.forEach(c => {
+        if (c.isActive && c.lastStart != null) {
+          c.totalMs += now - c.lastStart;
+          c.isActive = false;
+          c.lastStart = null;
+        }
+      });
+      saveToStorage();
+      renderTable();
+    }
+
+    function activateClient(id) {
+      const client = getClientById(id);
+      if (!client) return;
+      const now = Date.now();
+
+      if (client.isActive) {
+        client.totalMs += now - client.lastStart;
+        client.isActive = false;
+        client.lastStart = null;
+      } else {
+        clients.forEach(c => {
+          if (c.isActive && c.lastStart != null) {
+            c.totalMs += now - c.lastStart;
+            c.isActive = false;
+            c.lastStart = null;
+          }
+        });
+        client.isActive = true;
+        client.lastStart = now;
+      }
+
+      saveToStorage();
+      renderTable();
+    }
+
+    function resetClient(id) {
+      const client = getClientById(id);
+      if (!client) return;
+      const conferma = confirm(`Azzerare il tempo per "${client.name}"?`);
+      if (!conferma) return;
+
+      client.totalMs = 0;
+      client.isActive = false;
+      client.lastStart = null;
+      saveToStorage();
+      renderTable();
+    }
+
+    function deleteClient(id) {
+      const client = getClientById(id);
+      if (!client) return;
+      const conferma = confirm(`Eliminare il cliente "${client.name}"? Il tempo conteggiato andrà perso.`);
+      if (!conferma) return;
+
+      clients = clients.filter(c => c.id !== id);
+      saveToStorage();
+      renderTable();
+    }
+
+    function addClient(name) {
+      const trimmed = name.trim();
+      if (!trimmed) return;
+      const index = clients.length;
+      const newClient = {
+        id: Date.now().toString() + Math.random().toString(36).slice(2),
+        name: trimmed,
+        totalMs: 0,
+        isActive: false,
+        lastStart: null,
+        hourlyRate: 0,
+        color: getDefaultColor(index)
+      };
+      clients.push(newClient);
+      saveToStorage();
+      renderTable();
+    }
+
+    function addExtraMinutes(id) {
+      const client = getClientById(id);
+      if (!client) return;
+
+      const value = prompt(`Quanti minuti extra vuoi aggiungere a "${client.name}"?`, "15");
+      if (value === null) return;
+
+      const minutes = parseFloat(String(value).replace(",", "."));
+      if (isNaN(minutes) || minutes <= 0) {
+        alert("Inserisci un numero di minuti valido (maggiore di 0).");
+        return;
+      }
+
+      client.totalMs += minutes * 60 * 1000;
+      saveToStorage();
+      renderTable();
+    }
+
+    function updateHourlyRate(id, newRateStr) {
+      const client = getClientById(id);
+      if (!client) return;
+      const clean = String(newRateStr).replace(",", ".");
+      const rate = parseFloat(clean);
+      client.hourlyRate = isNaN(rate) || rate < 0 ? 0 : rate;
+      saveToStorage();
+    }
+
+    function updateClientColor(id, newColor) {
+      const client = getClientById(id);
+      if (!client) return;
+      client.color = newColor || "#CCCCCC";
+      saveToStorage();
+      updateLiveValues();
+    }
+
+    function exportBackup() {
+      const payload = {
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        clients
+      };
+      const json = JSON.stringify(payload, null, 2);
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+
+      const now = new Date();
+      const pad = (n) => String(n).padStart(2, "0");
+      const fileName = `time-tracker-backup-${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}.json`;
+
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      alert("Backup esportato. Se i download sono in una cartella iCloud Drive, il file è già su iCloud.");
+    }
+
+    function renderTable() {
+      const tbody = document.getElementById("clientsTbody");
+      tbody.innerHTML = "";
+
+      if (clients.length === 0) {
+        const tr = document.createElement("tr");
+        const td = document.createElement("td");
+        td.colSpan = 7;
+        td.textContent = "Nessun cliente ancora aggiunto.";
+        td.style.color = "#666";
+        tr.appendChild(td);
+        tbody.appendChild(tr);
+        return;
+      }
+
+      clients.forEach(client => {
+        const tr = document.createElement("tr");
+        tr.dataset.id = client.id;
+
+        // Colore (quadrato singolo)
+        const colorTd = document.createElement("td");
+        colorTd.className = "color-cell";
+        const wrapper = document.createElement("div");
+        wrapper.className = "color-wrapper";
+
+        const swatch = document.createElement("div");
+        swatch.className = "color-swatch";
+        swatch.style.backgroundColor = client.color || "#CCCCCC";
+
+        const colorInput = document.createElement("input");
+        colorInput.type = "color";
+        colorInput.className = "color-picker";
+        colorInput.value = client.color || "#CCCCCC";
+        colorInput.oninput = (e) => {
+          updateClientColor(client.id, e.target.value);
+        };
+
+        wrapper.appendChild(swatch);
+        wrapper.appendChild(colorInput);
+        colorTd.appendChild(wrapper);
+
+        // Nome
+        const nameTd = document.createElement("td");
+        nameTd.textContent = client.name;
+
+        // Tempo totale
+        const timeTd = document.createElement("td");
+        timeTd.className = "time";
+
+        // Tariffa oraria
+        const rateTd = document.createElement("td");
+        const rateInput = document.createElement("input");
+        rateInput.type = "text";
+        rateInput.className = "rate-input";
+        rateInput.placeholder = "0.00";
+        rateInput.value = client.hourlyRate ? client.hourlyRate : "";
+        rateInput.oninput = (e) => {
+          updateHourlyRate(client.id, e.target.value);
+        };
+        rateTd.appendChild(rateInput);
+
+        // Importo stimato
+        const costTd = document.createElement("td");
+        costTd.className = "cost";
+
+        // Stato
+        const statusTd = document.createElement("td");
+        statusTd.className = "status";
+
+        // Azioni
+        const actionsTd = document.createElement("td");
+        const actionsDiv = document.createElement("div");
+        actionsDiv.className = "actions";
+
+        const toggleBtn = document.createElement("button");
+        toggleBtn.textContent = client.isActive ? "Metti in pausa" : "Attiva";
+        toggleBtn.onclick = () => activateClient(client.id);
+
+        const extraBtn = document.createElement("button");
+        extraBtn.textContent = "+ Minuti extra";
+        extraBtn.onclick = () => addExtraMinutes(client.id);
+
+        const resetBtn = document.createElement("button");
+        resetBtn.textContent = "Azzera";
+        resetBtn.onclick = () => resetClient(client.id);
+
+        const deleteBtn = document.createElement("button");
+        deleteBtn.textContent = "Elimina";
+        deleteBtn.onclick = () => deleteClient(client.id);
+
+        actionsDiv.appendChild(toggleBtn);
+        actionsDiv.appendChild(extraBtn);
+        actionsDiv.appendChild(resetBtn);
+        actionsDiv.appendChild(deleteBtn);
+        actionsTd.appendChild(actionsDiv);
+
+        tr.appendChild(colorTd);
+        tr.appendChild(nameTd);
+        tr.appendChild(timeTd);
+        tr.appendChild(rateTd);
+        tr.appendChild(costTd);
+        tr.appendChild(statusTd);
+        tr.appendChild(actionsTd);
+
+        tbody.appendChild(tr);
+      });
+
+      updateLiveValues();
+    }
+
+    function updateLiveValues() {
+      const now = Date.now();
+
+      clients.forEach(client => {
+        const tr = document.querySelector(`tr[data-id="${client.id}"]`);
+        if (!tr) return;
+
+        const timeTd = tr.querySelector(".time");
+        const costTd = tr.querySelector(".cost");
+        const statusTd = tr.querySelector(".status");
+        const toggleBtn = tr.querySelector("button");
+        const swatch = tr.querySelector(".color-swatch");
+
+        let displayedMs = client.totalMs;
+        if (client.isActive && client.lastStart != null) {
+          displayedMs += now - client.lastStart;
+        }
+
+        if (timeTd) {
+          timeTd.textContent = formatMs(displayedMs);
+        }
+
+        if (costTd) {
+          if (client.hourlyRate && client.hourlyRate > 0) {
+            const hours = displayedMs / (1000 * 60 * 60);
+            const cost = hours * client.hourlyRate;
+            costTd.textContent = formatCurrency(cost);
+          } else {
+            costTd.textContent = "-";
+          }
+        }
+
+        if (statusTd) {
+          statusTd.innerHTML = "";
+          if (client.isActive) {
+            const wrap = document.createElement("span");
+            wrap.className = "status-wrapper";
+
+            const led = document.createElement("span");
+            led.className = "led";
+            led.style.backgroundColor = client.color || "#FF0000";
+
+            const badge = document.createElement("span");
+            badge.className = "badge-active";
+            badge.textContent = "IN CORSO";
+
+            wrap.appendChild(led);
+            wrap.appendChild(badge);
+            statusTd.appendChild(wrap);
+          } else {
+            statusTd.textContent = "In pausa";
+          }
+        }
+
+        if (toggleBtn) {
+          toggleBtn.textContent = client.isActive ? "Metti in pausa" : "Attiva";
+        }
+
+        if (swatch) {
+          swatch.style.backgroundColor = client.color || "#CCCCCC";
+        }
+
+        if (client.isActive) {
+          tr.classList.add("active-row");
+          tr.style.borderLeft = `3px solid ${client.color || "#000000"}`;
+        } else {
+          tr.classList.remove("active-row");
+          tr.style.borderLeft = "3px solid transparent";
+        }
+      });
+    }
+
+    document.addEventListener("DOMContentLoaded", () => {
+      loadFromStorage();
+      renderTable();
+
+      const input = document.getElementById("clientNameInput");
+      const addBtn = document.getElementById("addClientBtn");
+      const stopAllBtn = document.getElementById("stopAllBtn");
+      const backupBtn = document.getElementById("backupBtn");
+
+      addBtn.addEventListener("click", () => {
+        addClient(input.value);
+        input.value = "";
+        input.focus();
+      });
+
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          addClient(input.value);
+          input.value = "";
+        }
+      });
+
+      stopAllBtn.addEventListener("click", () => {
+        stopAllClients();
+      });
+
+      backupBtn.addEventListener("click", () => {
+        exportBackup();
+      });
+
+      setInterval(() => {
+        updateLiveValues();
+      }, 1000);
+    });
+  </script>
+</body>
+</html>
