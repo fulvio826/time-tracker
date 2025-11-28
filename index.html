@@ -169,10 +169,10 @@
     <button id="importBtn">Importa backup</button>
   </div>
   <div class="small">
-    ✔ Clicca “Attiva” per iniziare a conteggiare il tempo su un cliente.<br />
+    ✔ I dati vengono salvati su Supabase (tabella <b>projects</b>) e sono visibili da Mac e telefono.<br />
     ✔ Puoi avere anche più clienti attivi contemporaneamente.<br />
     ✔ Puoi aggiungere minuti extra, impostare la tariffa €/h e scegliere un colore per cliente.<br />
-    ✔ I dati sono salvati nel browser. Il backup esportato/importato è un file .json (puoi tenerlo su iCloud, Supabase storage, ecc).
+    ✔ Il backup esportato/importato è un file .json (puoi tenerlo su iCloud, Supabase storage, ecc).
   </div>
 
   <table id="clientsTable">
@@ -192,11 +192,18 @@
     </tbody>
   </table>
 
+  <!-- Supabase JS -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script>
-    // client: { id, name, totalMs, isActive, lastStart, hourlyRate, color }
+    // CONFIGURAZIONE SUPABASE
+    const SUPABASE_URL = "https://chyesztwritnxwpdogor.supabase.co";
+    const SUPABASE_ANON_KEY = "sb_publishable_FuO7GE4E0BFz42W9OsHTUw_TfPZwg_p";
+    const WORKSPACE_ID = "FULVIO";
 
+    const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    // client: { id, name, totalMs, hourlyRate, color, isActive, lastStart }
     let clients = [];
-    const STORAGE_KEY = "timeTrackerClientsV1";
 
     const COLOR_PALETTE = [
       "#FF6B6B",
@@ -211,31 +218,6 @@
 
     function getDefaultColor(index) {
       return COLOR_PALETTE[index % COLOR_PALETTE.length];
-    }
-
-    function loadFromStorage() {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return;
-      try {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          clients = parsed.map((c, index) => ({
-            id: c.id,
-            name: c.name,
-            totalMs: c.totalMs || 0,
-            isActive: false,          // al reload sempre in pausa
-            lastStart: null,
-            hourlyRate: c.hourlyRate || 0,
-            color: c.color || getDefaultColor(index)
-          }));
-        }
-      } catch (e) {
-        console.error("Errore nel parse del localStorage", e);
-      }
-    }
-
-    function saveToStorage() {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(clients));
     }
 
     function formatMs(ms) {
@@ -257,41 +239,95 @@
       return clients.find(c => c.id === id);
     }
 
-    function stopAllClients() {
+    // ----- CARICAMENTO DA SUPABASE -----
+    async function loadFromSupabase() {
+      const { data, error } = await supabaseClient
+        .from("projects")
+        .select("id, name, total_ms, hourly_rate, color, is_active, last_start, workspace_id")
+        .eq("workspace_id", WORKSPACE_ID)
+        .order("name", { ascending: true });
+
+      if (error) {
+        console.error("Errore caricando da Supabase:", error);
+        alert("Errore nel caricare i dati da Supabase. Controlla la console.");
+        return;
+      }
+
+      clients = (data || []).map((c, index) => ({
+        id: c.id,
+        name: c.name || "Senza nome",
+        totalMs: c.total_ms || 0,
+        hourlyRate: c.hourly_rate ? Number(c.hourly_rate) : 0,
+        color: c.color || getDefaultColor(index),
+        isActive: c.is_active || false,
+        lastStart: c.last_start ? Number(c.last_start) : null
+      }));
+
+      renderTable();
+    }
+
+    async function saveClientState(client) {
+      if (!client.id) return;
+      const { error } = await supabaseClient
+        .from("projects")
+        .update({
+          name: client.name,
+          total_ms: client.totalMs,
+          hourly_rate: client.hourlyRate,
+          color: client.color,
+          is_active: client.isActive,
+          last_start: client.lastStart,
+          workspace_id: WORKSPACE_ID
+        })
+        .eq("id", client.id)
+        .eq("workspace_id", WORKSPACE_ID);
+
+      if (error) {
+        console.error("Errore aggiornando Supabase:", error);
+      }
+    }
+
+    async function stopAllClients() {
       const now = Date.now();
+      const toUpdate = [];
+
       clients.forEach(c => {
         if (c.isActive && c.lastStart != null) {
           c.totalMs += now - c.lastStart;
           c.isActive = false;
           c.lastStart = null;
+          toUpdate.push(saveClientState(c));
         }
       });
-      saveToStorage();
+
+      if (toUpdate.length > 0) {
+        await Promise.all(toUpdate);
+      }
       renderTable();
     }
 
-    // Ogni cliente è indipendente: puoi attivare più timer insieme
-    function activateClient(id) {
+    // multi-timer: ogni cliente è indipendente
+    async function activateClient(id) {
       const client = getClientById(id);
       if (!client) return;
       const now = Date.now();
 
       if (client.isActive) {
-        // pausa SOLO questo cliente
+        // metti in pausa
         client.totalMs += now - client.lastStart;
         client.isActive = false;
         client.lastStart = null;
       } else {
-        // attivo questo cliente (gli altri restano come sono)
+        // attiva
         client.isActive = true;
         client.lastStart = now;
       }
 
-      saveToStorage();
+      await saveClientState(client);
       renderTable();
     }
 
-    function resetClient(id) {
+    async function resetClient(id) {
       const client = getClientById(id);
       if (!client) return;
       const conferma = confirm(`Azzerare il tempo per "${client.name}"?`);
@@ -300,40 +336,72 @@
       client.totalMs = 0;
       client.isActive = false;
       client.lastStart = null;
-      saveToStorage();
+      await saveClientState(client);
       renderTable();
     }
 
-    function deleteClient(id) {
+    async function deleteClient(id) {
       const client = getClientById(id);
       if (!client) return;
       const conferma = confirm(`Eliminare il cliente "${client.name}"? Il tempo conteggiato andrà perso.`);
       if (!conferma) return;
 
       clients = clients.filter(c => c.id !== id);
-      saveToStorage();
       renderTable();
+
+      const { error } = await supabaseClient
+        .from("projects")
+        .delete()
+        .eq("id", id)
+        .eq("workspace_id", WORKSPACE_ID);
+
+      if (error) {
+        console.error("Errore eliminando su Supabase:", error);
+        alert("Errore nell'eliminazione su Supabase (vedi console).");
+      }
     }
 
-    function addClient(name) {
+    async function addClient(name) {
       const trimmed = name.trim();
       if (!trimmed) return;
       const index = clients.length;
+      const color = getDefaultColor(index);
+
+      const { data, error } = await supabaseClient
+        .from("projects")
+        .insert({
+          name: trimmed,
+          total_ms: 0,
+          hourly_rate: 0,
+          color: color,
+          is_active: false,
+          last_start: null,
+          workspace_id: WORKSPACE_ID
+        })
+        .select()
+        .single();
+
+      if (error) {
+        console.error("Errore aggiungendo cliente su Supabase:", error);
+        alert("Errore nell'aggiunta del cliente (vedi console).");
+        return;
+      }
+
       const newClient = {
-        id: Date.now().toString() + Math.random().toString(36).slice(2),
-        name: trimmed,
-        totalMs: 0,
-        isActive: false,
-        lastStart: null,
-        hourlyRate: 0,
-        color: getDefaultColor(index)
+        id: data.id,
+        name: data.name || trimmed,
+        totalMs: data.total_ms || 0,
+        hourlyRate: data.hourly_rate ? Number(data.hourly_rate) : 0,
+        color: data.color || color,
+        isActive: data.is_active || false,
+        lastStart: data.last_start ? Number(data.last_start) : null
       };
+
       clients.push(newClient);
-      saveToStorage();
       renderTable();
     }
 
-    function addExtraMinutes(id) {
+    async function addExtraMinutes(id) {
       const client = getClientById(id);
       if (!client) return;
 
@@ -347,24 +415,25 @@
       }
 
       client.totalMs += minutes * 60 * 1000;
-      saveToStorage();
+      await saveClientState(client);
       renderTable();
     }
 
-    function updateHourlyRate(id, newRateStr) {
+    async function updateHourlyRate(id, newRateStr) {
       const client = getClientById(id);
       if (!client) return;
       const clean = String(newRateStr).replace(",", ".");
       const rate = parseFloat(clean);
       client.hourlyRate = isNaN(rate) || rate < 0 ? 0 : rate;
-      saveToStorage();
+      // non faccio render per non perdere il focus
+      saveClientState(client);
     }
 
-    function updateClientColor(id, newColor) {
+    async function updateClientColor(id, newColor) {
       const client = getClientById(id);
       if (!client) return;
       client.color = newColor || "#CCCCCC";
-      saveToStorage();
+      saveClientState(client);
       updateLiveValues();
     }
 
@@ -373,7 +442,15 @@
       const payload = {
         version: 1,
         exportedAt: new Date().toISOString(),
-        clients
+        clients: clients.map(c => ({
+          id: c.id,
+          name: c.name,
+          totalMs: c.totalMs,
+          hourlyRate: c.hourlyRate,
+          color: c.color,
+          isActive: c.isActive,
+          lastStart: c.lastStart
+        }))
       };
       const json = JSON.stringify(payload, null, 2);
       const blob = new Blob([json], { type: "application/json" });
@@ -391,13 +468,13 @@
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
 
-      alert("Backup esportato. Se i download sono in una cartella iCloud Drive, il file è già su iCloud.");
+      alert("Backup esportato.");
     }
 
-    // ----- IMPORT BACKUP (Opzione A: sovrascrive tutto) -----
-    function importBackup() {
+    // ----- IMPORT BACKUP (sovrascrive tutto il workspace su Supabase) -----
+    async function importBackup() {
       const conferma = confirm(
-        "Importando un backup sovrascriverai tutti i dati attuali (clienti, tempi, colori, tariffe).\n\nVuoi continuare?"
+        "Importando un backup sovrascriverai tutti i dati attuali del workspace 'FULVIO' su Supabase.\n\nVuoi continuare?"
       );
       if (!conferma) return;
 
@@ -405,12 +482,12 @@
       fileInput.type = "file";
       fileInput.accept = "application/json,.json";
 
-      fileInput.onchange = (event) => {
+      fileInput.onchange = async (event) => {
         const file = event.target.files && event.target.files[0];
         if (!file) return;
 
         const reader = new FileReader();
-        reader.onload = (e) => {
+        reader.onload = async (e) => {
           try {
             const text = e.target.result;
             const data = JSON.parse(text);
@@ -420,20 +497,44 @@
               return;
             }
 
-            // Ricostruisco l'array clients dalla struttura del backup
-            clients = data.clients.map((c, index) => ({
-              id: c.id || (Date.now().toString() + Math.random().toString(36).slice(2)),
-              name: c.name || "Senza nome",
-              totalMs: c.totalMs || 0,
-              isActive: false,       // dopo import, tutti in pausa
-              lastStart: null,
-              hourlyRate: c.hourlyRate || 0,
-              color: c.color || getDefaultColor(index)
-            }));
+            // 1) cancello tutti i progetti del workspace
+            const { error: delError } = await supabaseClient
+              .from("projects")
+              .delete()
+              .eq("workspace_id", WORKSPACE_ID);
 
-            saveToStorage();
-            renderTable();
-            alert("Backup importato correttamente.");
+            if (delError) {
+              console.error("Errore cancellando i project su Supabase:", delError);
+              alert("Errore nella pulizia su Supabase (vedi console).");
+              return;
+            }
+
+            // 2) inserisco i nuovi dal backup
+            if (data.clients.length > 0) {
+              const rows = data.clients.map((c, index) => ({
+                name: c.name || "Senza nome",
+                total_ms: c.totalMs || 0,
+                hourly_rate: c.hourlyRate || 0,
+                color: c.color || getDefaultColor(index),
+                is_active: false,
+                last_start: null,
+                workspace_id: WORKSPACE_ID
+              }));
+
+              const { error: insError } = await supabaseClient
+                .from("projects")
+                .insert(rows);
+
+              if (insError) {
+                console.error("Errore inserendo da backup su Supabase:", insError);
+                alert("Errore durante l'import su Supabase (vedi console).");
+                return;
+              }
+            }
+
+            // 3) ricarico tutto
+            await loadFromSupabase();
+            alert("Backup importato e sincronizzato su Supabase.");
           } catch (err) {
             console.error("Errore durante l'import del backup:", err);
             alert("Errore durante la lettura del backup. Verifica il file selezionato.");
@@ -446,6 +547,7 @@
       fileInput.click();
     }
 
+    // ----- RENDER TABELLA -----
     function renderTable() {
       const tbody = document.getElementById("clientsTbody");
       tbody.innerHTML = "";
@@ -465,7 +567,7 @@
         const tr = document.createElement("tr");
         tr.dataset.id = client.id;
 
-        // Colore (quadrato singolo)
+        // Colore
         const colorTd = document.createElement("td");
         colorTd.className = "color-cell";
         const wrapper = document.createElement("div");
@@ -511,7 +613,7 @@
         const costTd = document.createElement("td");
         costTd.className = "cost";
 
-        // Stato (LED + testo)
+        // Stato
         const statusTd = document.createElement("td");
         statusTd.className = "status";
 
@@ -634,9 +736,6 @@
     }
 
     document.addEventListener("DOMContentLoaded", () => {
-      loadFromStorage();
-      renderTable();
-
       const input = document.getElementById("clientNameInput");
       const addBtn = document.getElementById("addClientBtn");
       const stopAllBtn = document.getElementById("stopAllBtn");
@@ -668,6 +767,9 @@
         importBackup();
       });
 
+      loadFromSupabase();
+
+      // aggiorno solo la parte visuale (tempo/importi/LED)
       setInterval(() => {
         updateLiveValues();
       }, 1000);
