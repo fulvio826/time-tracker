@@ -66,10 +66,24 @@
     tr.active-row {
       background: #f7f7f7;
     }
-    .time {
+
+    .time-cell {
+      white-space: nowrap;
+    }
+    .time-value {
       font-family: "SF Mono", Menlo, Monaco, Consolas, "Courier New", monospace;
       font-size: 12px;
     }
+    .today-badge {
+      display: inline-block;
+      margin-top: 2px;
+      padding: 1px 6px;
+      border-radius: 999px;
+      background: #f0f0f0;
+      color: #777;
+      font-size: 10px;
+    }
+
     .badge-active {
       display: inline-block;
       padding: 2px 6px;
@@ -202,7 +216,7 @@
 
     const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-    // client: { id, name, totalMs, hourlyRate, color, isActive, lastStart }
+    // client: { id, name, totalMs, hourlyRate, color, isActive, lastStart, todayMs }
     let clients = [];
 
     const COLOR_PALETTE = [
@@ -235,6 +249,22 @@
       return num.toFixed(2);
     }
 
+    function getTodayDateString() {
+      const d = new Date();
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      return `${y}-${m}-${day}`;
+    }
+
+    function dateStringFromMs(ms) {
+      const d = new Date(ms);
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      return `${y}-${m}-${day}`;
+    }
+
     function getClientById(id) {
       return clients.find(c => c.id === id);
     }
@@ -248,9 +278,27 @@
         .order("name", { ascending: true });
 
       if (error) {
-        console.error("Errore caricando da Supabase:", error);
+        console.error("Errore caricando da Supabase (projects):", error);
         alert("Errore nel caricare i dati da Supabase. Controlla la console.");
         return;
+      }
+
+      // carico le sessioni SOLO di oggi per calcolare il badge
+      const todayStr = getTodayDateString();
+      let todayMap = {};
+      const { data: sessionsData, error: sessionsError } = await supabaseClient
+        .from("sessions")
+        .select("project_id, duration_ms")
+        .eq("workspace_id", WORKSPACE_ID)
+        .eq("session_date", todayStr);
+
+      if (sessionsError) {
+        console.error("Errore caricando da Supabase (sessions):", sessionsError);
+      } else if (sessionsData) {
+        sessionsData.forEach(s => {
+          const d = s.duration_ms || 0;
+          todayMap[s.project_id] = (todayMap[s.project_id] || 0) + d;
+        });
       }
 
       clients = (data || []).map((c, index) => ({
@@ -260,7 +308,8 @@
         hourlyRate: c.hourly_rate ? Number(c.hourly_rate) : 0,
         color: c.color || getDefaultColor(index),
         isActive: c.is_active || false,
-        lastStart: c.last_start ? Number(c.last_start) : null
+        lastStart: c.last_start ? Number(c.last_start) : null,
+        todayMs: todayMap[c.id] || 0
       }));
 
       renderTable();
@@ -283,25 +332,56 @@
         .eq("workspace_id", WORKSPACE_ID);
 
       if (error) {
-        console.error("Errore aggiornando Supabase:", error);
+        console.error("Errore aggiornando Supabase (projects):", error);
+      }
+    }
+
+    async function insertSession(clientId, deltaMs, endTimestampMs) {
+      if (!clientId || !deltaMs || deltaMs <= 0) return;
+      const startMs = endTimestampMs - deltaMs;
+      const sessionDate = dateStringFromMs(endTimestampMs);
+      const { error } = await supabaseClient
+        .from("sessions")
+        .insert({
+          project_id: clientId,
+          start_ms: startMs,
+          end_ms: endTimestampMs,
+          duration_ms: deltaMs,
+          session_date: sessionDate,
+          workspace_id: WORKSPACE_ID
+        });
+
+      if (error) {
+        console.error("Errore inserendo sessione:", error);
+      } else {
+        // se è oggi, aggiorno il contatore in memoria
+        if (sessionDate === getTodayDateString()) {
+          const client = getClientById(clientId);
+          if (client) {
+            client.todayMs = (client.todayMs || 0) + deltaMs;
+          }
+        }
       }
     }
 
     async function stopAllClients() {
       const now = Date.now();
-      const toUpdate = [];
+      const promises = [];
 
       clients.forEach(c => {
         if (c.isActive && c.lastStart != null) {
-          c.totalMs += now - c.lastStart;
+          const delta = now - c.lastStart;
+          c.totalMs += delta;
           c.isActive = false;
           c.lastStart = null;
-          toUpdate.push(saveClientState(c));
+
+          promises.push(saveClientState(c));
+          promises.push(insertSession(c.id, delta, now));
         }
       });
 
-      if (toUpdate.length > 0) {
-        await Promise.all(toUpdate);
+      if (promises.length > 0) {
+        await Promise.all(promises);
       }
       renderTable();
     }
@@ -313,17 +393,23 @@
       const now = Date.now();
 
       if (client.isActive) {
-        // metti in pausa
-        client.totalMs += now - client.lastStart;
+        // metti in pausa: chiudo la sessione
+        const delta = now - client.lastStart;
+        client.totalMs += delta;
         client.isActive = false;
         client.lastStart = null;
+
+        await Promise.all([
+          saveClientState(client),
+          insertSession(client.id, delta, now)
+        ]);
       } else {
-        // attiva
+        // attiva: apro una nuova sessione (solo lato project, la sessione verrà scritta alla pausa)
         client.isActive = true;
         client.lastStart = now;
+        await saveClientState(client);
       }
 
-      await saveClientState(client);
       renderTable();
     }
 
@@ -336,7 +422,17 @@
       client.totalMs = 0;
       client.isActive = false;
       client.lastStart = null;
+      client.todayMs = 0;
+
       await saveClientState(client);
+
+      // Opzionale: potresti anche cancellare le sessions di questo client
+      // const { error } = await supabaseClient
+      //   .from("sessions")
+      //   .delete()
+      //   .eq("project_id", client.id)
+      //   .eq("workspace_id", WORKSPACE_ID);
+
       renderTable();
     }
 
@@ -359,6 +455,7 @@
         console.error("Errore eliminando su Supabase:", error);
         alert("Errore nell'eliminazione su Supabase (vedi console).");
       }
+      // sessions collegate vengono cancellate dal ON DELETE CASCADE
     }
 
     async function addClient(name) {
@@ -394,7 +491,8 @@
         hourlyRate: data.hourly_rate ? Number(data.hourly_rate) : 0,
         color: data.color || color,
         isActive: data.is_active || false,
-        lastStart: data.last_start ? Number(data.last_start) : null
+        lastStart: data.last_start ? Number(data.last_start) : null,
+        todayMs: 0
       };
 
       clients.push(newClient);
@@ -414,8 +512,16 @@
         return;
       }
 
-      client.totalMs += minutes * 60 * 1000;
-      await saveClientState(client);
+      const delta = minutes * 60 * 1000;
+      const now = Date.now();
+
+      client.totalMs += delta;
+
+      await Promise.all([
+        saveClientState(client),
+        insertSession(client.id, delta, now)
+      ]);
+
       renderTable();
     }
 
@@ -451,6 +557,8 @@
           isActive: c.isActive,
           lastStart: c.lastStart
         }))
+        // Nota: il backup qui contiene solo projects, non le sessions.
+        // Le sessions le usiamo per il badge "oggi".
       };
       const json = JSON.stringify(payload, null, 2);
       const blob = new Blob([json], { type: "application/json" });
@@ -497,14 +605,23 @@
               return;
             }
 
-            // 1) cancello tutti i progetti del workspace
+            // 1) cancello tutti i progetti e le loro sessioni del workspace
+            const { error: delSessionsError } = await supabaseClient
+              .from("sessions")
+              .delete()
+              .eq("workspace_id", WORKSPACE_ID);
+
+            if (delSessionsError) {
+              console.error("Errore cancellando sessions su Supabase:", delSessionsError);
+            }
+
             const { error: delError } = await supabaseClient
               .from("projects")
               .delete()
               .eq("workspace_id", WORKSPACE_ID);
 
             if (delError) {
-              console.error("Errore cancellando i project su Supabase:", delError);
+              console.error("Errore cancellando projects su Supabase:", delError);
               alert("Errore nella pulizia su Supabase (vedi console).");
               return;
             }
@@ -516,8 +633,8 @@
                 total_ms: c.totalMs || 0,
                 hourly_rate: c.hourlyRate || 0,
                 color: c.color || getDefaultColor(index),
-                is_active: false,
-                last_start: null,
+                is_active: c.isActive || false,
+                last_start: c.lastStart || null,
                 workspace_id: WORKSPACE_ID
               }));
 
@@ -593,9 +710,18 @@
         const nameTd = document.createElement("td");
         nameTd.textContent = client.name;
 
-        // Tempo totale
+        // Tempo totale + badge oggi
         const timeTd = document.createElement("td");
-        timeTd.className = "time";
+        timeTd.className = "time-cell";
+
+        const timeValue = document.createElement("div");
+        timeValue.className = "time-value";
+
+        const todayDiv = document.createElement("div");
+        todayDiv.className = "today-badge";
+
+        timeTd.appendChild(timeValue);
+        timeTd.appendChild(todayDiv);
 
         // Tariffa oraria
         const rateTd = document.createElement("td");
@@ -665,7 +791,8 @@
         const tr = document.querySelector(`tr[data-id="${client.id}"]`);
         if (!tr) return;
 
-        const timeTd = tr.querySelector(".time");
+        const timeValue = tr.querySelector(".time-value");
+        const todayBadge = tr.querySelector(".today-badge");
         const costTd = tr.querySelector(".cost");
         const statusTd = tr.querySelector(".status");
         const toggleBtn = tr.querySelector("button");
@@ -676,8 +803,27 @@
           displayedMs += now - client.lastStart;
         }
 
-        if (timeTd) {
-          timeTd.textContent = formatMs(displayedMs);
+        if (timeValue) {
+          timeValue.textContent = formatMs(displayedMs);
+        }
+
+        // badge "Oggi"
+        if (todayBadge) {
+          let todayMs = client.todayMs || 0;
+          // se attivo e partito oggi, aggiungo la parte in corso
+          if (client.isActive && client.lastStart != null) {
+            const sessionDate = dateStringFromMs(client.lastStart);
+            if (sessionDate === getTodayDateString()) {
+              todayMs += now - client.lastStart;
+            }
+          }
+          if (todayMs > 0) {
+            todayBadge.textContent = "Oggi: " + formatMs(todayMs);
+            todayBadge.style.visibility = "visible";
+          } else {
+            todayBadge.textContent = "Oggi: 00:00:00";
+            todayBadge.style.visibility = "hidden";
+          }
         }
 
         if (costTd) {
@@ -769,7 +915,7 @@
 
       loadFromSupabase();
 
-      // aggiorno solo la parte visuale (tempo/importi/LED)
+      // aggiorno solo la parte visuale (tempo/importi/LED/badge)
       setInterval(() => {
         updateLiveValues();
       }, 1000);
