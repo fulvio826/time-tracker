@@ -283,14 +283,14 @@
         return;
       }
 
-      // carico le sessioni SOLO di oggi per calcolare il badge
-      const todayStr = getTodayDateString();
-      let todayMap = {};
-      const { data: sessionsData, error: sessionsError } = await supabaseClient
-        .from("sessions")
-        .select("project_id, duration_ms")
-        .eq("workspace_id", WORKSPACE_ID)
-        .eq("session_date", todayStr);
+// carico le sessioni SOLO di oggi per calcolare il badge
+const todayStr = getTodayDateString();
+let todayMap = {};
+const { data: sessionsData, error: sessionsError } = await supabaseClient
+  .from("sessions")
+  .select("project_id, duration_ms, date")
+  .eq("workspace_id", WORKSPACE_ID)
+  .eq("date", todayStr);
 
       if (sessionsError) {
         console.error("Errore caricando da Supabase (sessions):", sessionsError);
@@ -336,33 +336,35 @@
       }
     }
 
-    async function insertSession(clientId, deltaMs, endTimestampMs) {
-      if (!clientId || !deltaMs || deltaMs <= 0) return;
-      const startMs = endTimestampMs - deltaMs;
-      const sessionDate = dateStringFromMs(endTimestampMs);
-      const { error } = await supabaseClient
-        .from("sessions")
-        .insert({
-          project_id: clientId,
-          start_ms: startMs,
-          end_ms: endTimestampMs,
-          duration_ms: deltaMs,
-          session_date: sessionDate,
-          workspace_id: WORKSPACE_ID
-        });
+ async function insertSession(clientId, deltaMs, endTimestampMs) {
+  if (!clientId || !deltaMs || deltaMs <= 0) return;
+  const startMs = endTimestampMs - deltaMs;
+  const sessionDate = dateStringFromMs(endTimestampMs);
 
-      if (error) {
-        console.error("Errore inserendo sessione:", error);
-      } else {
-        // se è oggi, aggiorno il contatore in memoria
-        if (sessionDate === getTodayDateString()) {
-          const client = getClientById(clientId);
-          if (client) {
-            client.todayMs = (client.todayMs || 0) + deltaMs;
-          }
-        }
+  const { error } = await supabaseClient
+    .from("sessions")
+    .insert({
+      project_id: clientId,
+      start_time: new Date(startMs).toISOString(),
+      end_time: new Date(endTimestampMs).toISOString(),
+      duration_ms: deltaMs,
+      date: sessionDate,
+      workspace_id: WORKSPACE_ID
+    });
+
+  if (error) {
+    console.error("Errore inserendo sessione:", error);
+  } else {
+    if (sessionDate === getTodayDateString()) {
+      const client = getClientById(clientId);
+      if (client) {
+        client.todayMs = (client.todayMs || 0) + deltaMs;
       }
     }
+  }
+}
+
+
 
     async function stopAllClients() {
       const now = Date.now();
@@ -808,23 +810,19 @@
         }
 
         // badge "Oggi"
-        if (todayBadge) {
-          let todayMs = client.todayMs || 0;
-          // se attivo e partito oggi, aggiungo la parte in corso
-          if (client.isActive && client.lastStart != null) {
-            const sessionDate = dateStringFromMs(client.lastStart);
-            if (sessionDate === getTodayDateString()) {
-              todayMs += now - client.lastStart;
-            }
-          }
-          if (todayMs > 0) {
-            todayBadge.textContent = "Oggi: " + formatMs(todayMs);
-            todayBadge.style.visibility = "visible";
-          } else {
-            todayBadge.textContent = "Oggi: 00:00:00";
-            todayBadge.style.visibility = "hidden";
-          }
-        }
+if (todayBadge) {
+  let todayMs = client.todayMs || 0;
+  // se attivo e partito oggi, aggiungo la parte in corso
+  if (client.isActive && client.lastStart != null) {
+    const sessionDate = dateStringFromMs(client.lastStart);
+    if (sessionDate === getTodayDateString()) {
+      todayMs += now - client.lastStart;
+    }
+  }
+  todayBadge.textContent = "Oggi: " + formatMs(todayMs);
+  // sempre visibile, anche se è 00:00:00
+  todayBadge.style.visibility = "visible";
+}
 
         if (costTd) {
           if (client.hourlyRate && client.hourlyRate > 0) {
