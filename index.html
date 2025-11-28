@@ -406,32 +406,24 @@
     }
 
     function activateClient(id) {
-      const client = getClientById(id);
-      if (!client) return;
-      const now = Date.now();
+  const client = getClientById(id);
+  if (!client) return;
+  const now = Date.now();
 
-      if (client.isActive) {
-        client.totalMs += now - client.lastStart;
-        client.isActive = false;
-        client.lastStart = null;
-        void upsertProject(client);
-      } else {
-        clients.forEach(c => {
-          if (c.isActive && c.lastStart != null) {
-            c.totalMs += now - c.lastStart;
-            c.isActive = false;
-            c.lastStart = null;
-            void upsertProject(c);
-          }
-        });
-        client.isActive = true;
-        client.lastStart = now;
-        void upsertProject(client);
-      }
+  if (client.isActive) {
+    // era in corso → lo metto in pausa
+    client.totalMs += now - client.lastStart;
+    client.isActive = false;
+    client.lastStart = null;
+  } else {
+    // era in pausa → lo avvio (senza toccare gli altri)
+    client.isActive = true;
+    client.lastStart = now;
+  }
 
-      renderTable();
-    }
-
+  void upsertProject(client); // salvo su Supabase
+  renderTable();
+}
     function resetClient(id) {
       const client = getClientById(id);
       if (!client) return;
