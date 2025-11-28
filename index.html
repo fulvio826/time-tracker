@@ -166,12 +166,13 @@
     <button class="primary" id="addClientBtn">Aggiungi cliente</button>
     <button id="stopAllBtn">Ferma tutti</button>
     <button id="backupBtn">Esporta backup</button>
+    <button id="importBtn">Importa backup</button>
   </div>
   <div class="small">
     ✔ Clicca “Attiva” per iniziare a conteggiare il tempo su un cliente.<br />
     ✔ Puoi avere anche più clienti attivi contemporaneamente.<br />
     ✔ Puoi aggiungere minuti extra, impostare la tariffa €/h e scegliere un colore per cliente.<br />
-    ✔ I dati sono salvati nel browser. Il backup esportato può andare in una cartella su iCloud Drive.
+    ✔ I dati sono salvati nel browser. Il backup esportato/importato è un file .json (puoi tenerlo su iCloud, Supabase storage, ecc).
   </div>
 
   <table id="clientsTable">
@@ -222,7 +223,7 @@
             id: c.id,
             name: c.name,
             totalMs: c.totalMs || 0,
-            isActive: false,          // al reload partono in pausa
+            isActive: false,          // al reload sempre in pausa
             lastStart: null,
             hourlyRate: c.hourlyRate || 0,
             color: c.color || getDefaultColor(index)
@@ -269,19 +270,19 @@
       renderTable();
     }
 
-    // ORA: ogni cliente è indipendente, puoi attivarne più di uno
+    // Ogni cliente è indipendente: puoi attivare più timer insieme
     function activateClient(id) {
       const client = getClientById(id);
       if (!client) return;
       const now = Date.now();
 
       if (client.isActive) {
-        // metto in pausa SOLO questo cliente
+        // pausa SOLO questo cliente
         client.totalMs += now - client.lastStart;
         client.isActive = false;
         client.lastStart = null;
       } else {
-        // attivo questo cliente (gli altri continuano come sono)
+        // attivo questo cliente (gli altri restano come sono)
         client.isActive = true;
         client.lastStart = now;
       }
@@ -367,6 +368,7 @@
       updateLiveValues();
     }
 
+    // ----- EXPORT BACKUP -----
     function exportBackup() {
       const payload = {
         version: 1,
@@ -390,6 +392,58 @@
       URL.revokeObjectURL(url);
 
       alert("Backup esportato. Se i download sono in una cartella iCloud Drive, il file è già su iCloud.");
+    }
+
+    // ----- IMPORT BACKUP (Opzione A: sovrascrive tutto) -----
+    function importBackup() {
+      const conferma = confirm(
+        "Importando un backup sovrascriverai tutti i dati attuali (clienti, tempi, colori, tariffe).\n\nVuoi continuare?"
+      );
+      if (!conferma) return;
+
+      const fileInput = document.createElement("input");
+      fileInput.type = "file";
+      fileInput.accept = "application/json,.json";
+
+      fileInput.onchange = (event) => {
+        const file = event.target.files && event.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          try {
+            const text = e.target.result;
+            const data = JSON.parse(text);
+
+            if (!data || !Array.isArray(data.clients)) {
+              alert("Backup non valido: formato inatteso.");
+              return;
+            }
+
+            // Ricostruisco l'array clients dalla struttura del backup
+            clients = data.clients.map((c, index) => ({
+              id: c.id || (Date.now().toString() + Math.random().toString(36).slice(2)),
+              name: c.name || "Senza nome",
+              totalMs: c.totalMs || 0,
+              isActive: false,       // dopo import, tutti in pausa
+              lastStart: null,
+              hourlyRate: c.hourlyRate || 0,
+              color: c.color || getDefaultColor(index)
+            }));
+
+            saveToStorage();
+            renderTable();
+            alert("Backup importato correttamente.");
+          } catch (err) {
+            console.error("Errore durante l'import del backup:", err);
+            alert("Errore durante la lettura del backup. Verifica il file selezionato.");
+          }
+        };
+
+        reader.readAsText(file);
+      };
+
+      fileInput.click();
     }
 
     function renderTable() {
@@ -587,6 +641,7 @@
       const addBtn = document.getElementById("addClientBtn");
       const stopAllBtn = document.getElementById("stopAllBtn");
       const backupBtn = document.getElementById("backupBtn");
+      const importBtn = document.getElementById("importBtn");
 
       addBtn.addEventListener("click", () => {
         addClient(input.value);
@@ -607,6 +662,10 @@
 
       backupBtn.addEventListener("click", () => {
         exportBackup();
+      });
+
+      importBtn.addEventListener("click", () => {
+        importBackup();
       });
 
       setInterval(() => {
